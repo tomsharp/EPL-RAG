@@ -74,10 +74,10 @@ class Retriever:
             return "No relevant articles found in the knowledge base.", docs
 
         parts: list[str] = []
-        for doc in docs:
+        for i, doc in enumerate(docs, 1):
             pub = doc.published or "Unknown date"
             parts.append(
-                f"[{doc.source.upper()}] {doc.title} ({pub})\n"
+                f"[{i}] [{doc.source.upper()}] {doc.title} ({pub})\n"
                 f"{doc.summary}"
             )
 

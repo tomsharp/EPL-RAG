@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,49 +68,100 @@ class ConversationStore:
 
 
 class ChatEngine:
-    def __init__(self, retriever: Retriever, llm_client: LLMClient) -> None:
+    def __init__(
+        self,
+        retriever: Retriever,
+        llm_client: LLMClient,
+        stats_client=None,
+    ) -> None:
         self.retriever = retriever
         self.llm = llm_client
+        self.stats_client = stats_client
         self.history = ConversationStore(max_turns=settings.max_history_turns)
 
     async def chat(self, session_id: str, message: str) -> dict:
-        # 1. Retrieve relevant context
-        context, sources = self.retriever.search_with_context(
-            message, top_k=settings.max_context_docs
+        # 1. Retrieve relevant news context and live stats concurrently
+        context_task = asyncio.get_event_loop().run_in_executor(
+            None, self.retriever.search_with_context, message, settings.max_context_docs
         )
+        stats_task = (
+            self.stats_client.get_formatted_stats()
+            if self.stats_client
+            else asyncio.sleep(0, result=None)
+        )
+        (context, sources), stats = await asyncio.gather(context_task, stats_task)
 
         # 2. Get conversation history
         history = self.history.get_history(session_id)
 
         # 3. Build messages list for the Chat Completions API
-        messages = self._build_messages(message, context, history)
+        messages = self._build_messages(message, context, history, stats)
 
         # 4. Generate answer
-        answer = await self.llm.generate(messages)
+        raw_answer = await self.llm.generate(messages)
 
-        # 5. Store turns
+        # 5. Strip the SOURCES footer and keep only articles Phil actually used
+        answer, used_sources = _parse_sources_footer(raw_answer, sources)
+
+        # 6. Store turns (store the clean answer, not the raw one with the footer)
         self.history.add_turn(session_id, "user", message)
         self.history.add_turn(session_id, "assistant", answer)
 
         return {
             "answer": answer,
-            "sources": sources,
+            "sources": used_sources,
             "retrieved_doc_count": len(sources),
         }
 
-    def _build_messages(self, message: str, context: str, history: list[Turn]) -> list[dict]:
+    def _build_messages(
+        self,
+        message: str,
+        context: str,
+        history: list[Turn],
+        stats: str | None = None,
+    ) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
 
         # Inject prior conversation turns so the model has context
         for turn in history:
             messages.append({"role": turn.role, "content": turn.content})
 
-        # Current user message with retrieved context prepended
-        user_content = (
-            f"Here's the latest news that might be relevant:\n"
-            f"---\n{context}\n---\n\n"
-            f"{message}"
-        )
-        messages.append({"role": "user", "content": user_content})
+        # Build user content: live stats block + news context + question
+        user_parts: list[str] = []
+        if stats:
+            user_parts.append(f"Live EPL stats:\n---\n{stats}\n---")
+        if context:
+            user_parts.append(
+                f"Here's the latest news that might be relevant:\n---\n{context}\n---\n\n"
+                f"After your reply, on its own line write: SOURCES: followed by the numbers "
+                f"of any articles above you actually used (e.g. SOURCES:1,3), or SOURCES: if none."
+            )
+        user_parts.append(message)
 
+        messages.append({"role": "user", "content": "\n\n".join(user_parts)})
         return messages
+
+
+def _parse_sources_footer(raw: str, all_sources: list) -> tuple[str, list]:
+    """Strip the SOURCES: line appended by the LLM and return (clean_answer, used_sources).
+
+    If the model didn't include a SOURCES line, returns the full answer with no sources.
+    """
+    match = re.search(r"\nSOURCES:\s*([0-9,\s]*)\s*$", raw.rstrip(), re.IGNORECASE)
+    if not match:
+        return raw.strip(), []
+
+    clean = raw[: match.start()].strip()
+    indices_str = match.group(1).strip()
+
+    if not indices_str:
+        return clean, []
+
+    used: list = []
+    for part in re.split(r"[,\s]+", indices_str):
+        if part.isdigit():
+            idx = int(part) - 1  # convert 1-based → 0-based
+            if 0 <= idx < len(all_sources):
+                used.append(all_sources[idx])
+
+    return clean, used

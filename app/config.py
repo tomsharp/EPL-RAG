@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     max_history_turns: int = 5
     max_context_docs: int = 5
 
+    # Live stats — football-data.org (leave blank to disable)
+    football_data_api_key: str = ""
+    stats_cache_ttl_seconds: int = 600
+
     # Auth (leave blank to disable password protection)
     app_password: str = ""
 

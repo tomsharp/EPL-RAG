@@ -18,6 +18,7 @@ from app.ingestion.rss_fetcher import RSSFetcher
 from app.rag.chat_engine import ChatEngine
 from app.rag.llm_client import LLMClient
 from app.rag.retriever import Retriever
+from app.stats.football_data_client import FootballDataClient
 from app.utils.deduplication import DeduplicationStore
 
 logging.basicConfig(
@@ -130,7 +131,17 @@ async def lifespan(app: FastAPI):
     # 5. Build the RAG chain
     retriever = Retriever(embedder=embedder)
     llm_client = LLMClient()
-    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client)
+    stats_client = (
+        FootballDataClient(
+            settings.football_data_api_key,
+            settings.stats_cache_ttl_seconds,
+        )
+        if settings.football_data_api_key
+        else None
+    )
+    if stats_client:
+        logger.info("Live stats enabled (football-data.org, cache TTL %ds)", settings.stats_cache_ttl_seconds)
+    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client, stats_client=stats_client)
 
     # 6. Attach to app.state for route handlers
     app.state.pipeline = pipeline
@@ -175,6 +186,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     scheduler.shutdown(wait=False)
     await llm_client.close()
+    if stats_client:
+        await stats_client.close()
     weaviate_manager.close()
     logger.info("Shutdown complete.")
 

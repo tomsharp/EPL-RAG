@@ -15,6 +15,12 @@ RSS_FEEDS: dict[str, str] = {
     "bbc": "https://feeds.bbci.co.uk/sport/football/premier-league/rss.xml",
     "guardian": "https://www.theguardian.com/football/premierleague/rss",
     "skysports": "https://www.skysports.com/rss/11095",  # Premier League-specific
+    "football365": "https://www.football365.com/feed",
+    "90min": "https://www.90min.com/posts.rss",
+    "goal": "https://www.goal.com/feeds/en/news",
+    "talksport": "https://talksport.com/football/feed/",
+    "mirror": "https://www.mirror.co.uk/sport/football/rss.xml",
+    "express": "https://www.express.co.uk/sport/football/rss",
 }
 
 
