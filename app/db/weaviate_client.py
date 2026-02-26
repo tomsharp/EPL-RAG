@@ -1,4 +1,5 @@
 import logging
+import time
 
 import weaviate
 import weaviate.classes as wvc
@@ -13,27 +14,37 @@ class WeaviateManager:
     def __init__(self) -> None:
         self.client: weaviate.WeaviateClient | None = None
 
-    def connect(self) -> None:
-        if settings.weaviate_secure:
-            self.client = weaviate.connect_to_custom(
-                http_host=settings.weaviate_host,
-                http_port=443,
-                http_secure=True,
-                grpc_host=settings.weaviate_host,
-                grpc_port=443,
-                grpc_secure=True,
-            )
-        else:
-            self.client = weaviate.connect_to_local(
-                host=settings.weaviate_host,
-                port=settings.weaviate_port,
-                grpc_port=settings.weaviate_grpc_port,
-            )
-        logger.info(
-            "Connected to Weaviate at %s (secure=%s)",
-            settings.weaviate_host,
-            settings.weaviate_secure,
-        )
+    def connect(self, retries: int = 10, delay: int = 6) -> None:
+        for attempt in range(1, retries + 1):
+            try:
+                if settings.weaviate_secure:
+                    self.client = weaviate.connect_to_custom(
+                        http_host=settings.weaviate_host,
+                        http_port=443,
+                        http_secure=True,
+                        grpc_host=settings.weaviate_host,
+                        grpc_port=443,
+                        grpc_secure=True,
+                    )
+                else:
+                    self.client = weaviate.connect_to_local(
+                        host=settings.weaviate_host,
+                        port=settings.weaviate_port,
+                        grpc_port=settings.weaviate_grpc_port,
+                    )
+                logger.info(
+                    "Connected to Weaviate at %s (secure=%s)",
+                    settings.weaviate_host,
+                    settings.weaviate_secure,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Weaviate connection attempt %d/%d failed: %s", attempt, retries, exc
+                )
+                if attempt < retries:
+                    time.sleep(delay)
+        raise RuntimeError(f"Could not connect to Weaviate after {retries} attempts")
 
     def close(self) -> None:
         if self.client:

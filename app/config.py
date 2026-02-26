@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     max_history_turns: int = 5
     max_context_docs: int = 5
 
+    # Auth (leave blank to disable password protection)
+    app_password: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

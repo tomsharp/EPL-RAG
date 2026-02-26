@@ -30,3 +30,6 @@ numpy==1.26.4
 
 # Static file serving (required by FastAPI StaticFiles)
 aiofiles==23.2.1
+
+# Form parsing (required for login endpoint)
+python-multipart==0.0.18
