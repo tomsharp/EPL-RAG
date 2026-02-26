@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     weaviate_host: str = "localhost"
     weaviate_port: int = 8080
     weaviate_grpc_port: int = 50051
+    weaviate_secure: bool = False  # set True when connecting over HTTPS (e.g. Fly.io)
     collection_name: str = "EplNews"
 
     # Embeddings
