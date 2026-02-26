@@ -1,0 +1,32 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Config
+pydantic-settings==2.6.1
+
+# Vector DB
+weaviate-client==4.9.4
+
+# Embeddings (torch installed separately in Dockerfile for CPU-only wheel)
+sentence-transformers==3.3.1
+
+# RSS parsing
+feedparser==6.0.11
+
+# HTML cleaning
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# Async HTTP (HuggingFace Inference API)
+httpx==0.27.0
+
+# Scheduler
+apscheduler==3.10.4
+
+# Utilities
+python-dotenv==1.0.1
+numpy==1.26.4
+
+# Static file serving (required by FastAPI StaticFiles)
+aiofiles==23.2.1
