@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.rag.agent_tools import AGENT_TOOLS, ToolDispatcher
 from app.rag.llm_client import LLMClient
 from app.rag.retriever import Retriever, SourceDoc
 
@@ -23,14 +24,17 @@ Your vibe:
 - Never robotic. Never bullet points. Just talk like a person.
 
 What you know:
-- For current news, results, transfers — you've been keeping up. Share what you know but don't invent specific scores or signings you're not certain about.
+- For live stats — league table, top scorers, recent results, upcoming fixtures — use your tools to look them up fresh.
+- For current news and transfers — you've been keeping up. Share what you know but don't invent specific scores or signings you're not certain about.
 - For general EPL knowledge — history, clubs, legendary players, how the league works — you know it all cold, so just answer.
 
 Hard rules:
 - Never say "context", "articles", "based on", "provided information", or anything that sounds like a search engine or a robot.
-- If you don't know something recent, just say "not sure on that one mate, might want to check the latest" — keep it natural.
+- If you don't know something recent and you don't have a tool for it, just say "not sure on that one mate, might want to check the latest" — keep it natural.
 - This is football, not a board meeting. Keep it fun.\
 """
+
+_MAX_TOOL_ITERATIONS = 5
 
 
 @dataclass
@@ -48,7 +52,6 @@ class ConversationStore:
     def add_turn(self, session_id: str, role: str, content: str) -> None:
         turns = self._sessions[session_id]
         turns.append(Turn(role=role, content=content))
-        # Keep only the last max_turns pairs (user + assistant = 2 entries each)
         cap = self.max_turns * 2
         if len(turns) > cap:
             self._sessions[session_id] = turns[-cap:]
@@ -72,38 +75,60 @@ class ChatEngine:
         self,
         retriever: Retriever,
         llm_client: LLMClient,
-        stats_client=None,
+        tool_dispatcher: ToolDispatcher | None = None,
     ) -> None:
         self.retriever = retriever
         self.llm = llm_client
-        self.stats_client = stats_client
+        self.tool_dispatcher = tool_dispatcher
         self.history = ConversationStore(max_turns=settings.max_history_turns)
 
     async def chat(self, session_id: str, message: str) -> dict:
-        # 1. Retrieve relevant news context and live stats concurrently
+        # 1. Retrieve relevant news context (RAG)
         context_task = asyncio.get_event_loop().run_in_executor(
             None, self.retriever.search_with_context, message, settings.max_context_docs
         )
-        stats_task = (
-            self.stats_client.get_formatted_stats()
-            if self.stats_client
-            else asyncio.sleep(0, result=None)
-        )
-        (context, sources), stats = await asyncio.gather(context_task, stats_task)
+        context, sources = await context_task
 
         # 2. Get conversation history
         history = self.history.get_history(session_id)
 
-        # 3. Build messages list for the Chat Completions API
-        messages = self._build_messages(message, context, history, stats)
+        # 3. Build initial messages
+        messages = self._build_messages(message, context, history)
 
-        # 4. Generate answer
-        raw_answer = await self.llm.generate(messages)
+        # 4. Agentic loop — the LLM can call tools before giving its final answer
+        tools = AGENT_TOOLS if self.tool_dispatcher else []
+        raw_answer = ""
 
-        # 5. Strip the SOURCES footer and keep only articles Phil actually used
+        for iteration in range(_MAX_TOOL_ITERATIONS):
+            msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
+            messages.append(msg)
+
+            if finish_reason == "tool_calls":
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    break
+
+                # Execute all tool calls (may be parallel in theory, but free-tier
+                # football-data.org is rate-limited so we run sequentially)
+                for tc in tool_calls:
+                    result = await self.tool_dispatcher.dispatch(tc)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    })
+
+                logger.debug("Tool iteration %d/%d complete", iteration + 1, _MAX_TOOL_ITERATIONS)
+
+            else:
+                # finish_reason == "stop" (or "length") — we have the final answer
+                raw_answer = (msg.get("content") or "").strip()
+                break
+
+        # 5. Strip the SOURCES footer and map cited articles
         answer, used_sources = _parse_sources_footer(raw_answer, sources)
 
-        # 6. Store turns (store the clean answer, not the raw one with the footer)
+        # 6. Store turns
         self.history.add_turn(session_id, "user", message)
         self.history.add_turn(session_id, "assistant", answer)
 
@@ -118,18 +143,15 @@ class ChatEngine:
         message: str,
         context: str,
         history: list[Turn],
-        stats: str | None = None,
     ) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
 
-        # Inject prior conversation turns so the model has context
+        # Inject prior conversation turns
         for turn in history:
             messages.append({"role": turn.role, "content": turn.content})
 
-        # Build user content: live stats block + news context + question
+        # Build user content: news context + question
         user_parts: list[str] = []
-        if stats:
-            user_parts.append(f"Live EPL stats:\n---\n{stats}\n---")
         if context:
             user_parts.append(
                 f"Here's the latest news that might be relevant:\n---\n{context}\n---\n\n"
@@ -143,10 +165,7 @@ class ChatEngine:
 
 
 def _parse_sources_footer(raw: str, all_sources: list) -> tuple[str, list]:
-    """Strip the SOURCES: line appended by the LLM and return (clean_answer, used_sources).
-
-    If the model didn't include a SOURCES line, returns the full answer with no sources.
-    """
+    """Strip the SOURCES: line appended by the LLM and return (clean_answer, used_sources)."""
     match = re.search(r"\nSOURCES:\s*([0-9,\s]*)\s*$", raw.rstrip(), re.IGNORECASE)
     if not match:
         return raw.strip(), []

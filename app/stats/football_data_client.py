@@ -3,6 +3,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -28,6 +29,7 @@ class FootballDataClient:
     def __init__(self, api_key: str, cache_ttl_seconds: int = 600) -> None:
         self._ttl = cache_ttl_seconds
         self._cache: _Cache | None = None
+        self._caches: dict[str, _Cache] = {}  # per-method caches
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
             headers={"X-Auth-Token": api_key},
@@ -114,6 +116,64 @@ class FootballDataClient:
 
         return "\n\n".join(parts)
 
+    # ── Individual callable methods (used by the agentic tool dispatcher) ──────
+
+    async def get_standings(self) -> str:
+        async def fetch() -> str:
+            resp = await self._client.get("/competitions/PL/standings")
+            resp.raise_for_status()
+            return _format_standings(resp.json()) or "No standings data available."
+        return await self._cached("standings", fetch)
+
+    async def get_top_scorers(self, limit: int = 10) -> str:
+        limit = min(max(limit, 1), 20)
+        async def fetch() -> str:
+            resp = await self._client.get("/competitions/PL/scorers", params={"limit": limit})
+            resp.raise_for_status()
+            return _format_top_scorers(resp.json()) or "No scorers data available."
+        return await self._cached(f"scorers_{limit}", fetch)
+
+    async def get_recent_results(self, days: int = 14) -> str:
+        days = min(max(days, 1), 30)
+        async def fetch() -> str:
+            today = datetime.now(timezone.utc).date()
+            date_from = (today - timedelta(days=days)).isoformat()
+            resp = await self._client.get(
+                "/competitions/PL/matches",
+                params={"status": "FINISHED", "dateFrom": date_from, "dateTo": today.isoformat()},
+            )
+            resp.raise_for_status()
+            return _format_recent_results(resp.json(), days=days) or f"No results found in the last {days} days."
+        return await self._cached(f"results_{days}", fetch)
+
+    async def get_upcoming_fixtures(self, days: int = 21) -> str:
+        days = min(max(days, 1), 60)
+        async def fetch() -> str:
+            today = datetime.now(timezone.utc).date()
+            date_to = (today + timedelta(days=days)).isoformat()
+            resp = await self._client.get(
+                "/competitions/PL/matches",
+                params={"status": "SCHEDULED", "dateFrom": today.isoformat(), "dateTo": date_to},
+            )
+            resp.raise_for_status()
+            return _format_upcoming_fixtures(resp.json(), days=days) or f"No fixtures found in the next {days} days."
+        return await self._cached(f"fixtures_{days}", fetch)
+
+    async def _cached(self, key: str, fetcher: Callable[[], Awaitable[str]]) -> str:
+        now = time.time()
+        cached = self._caches.get(key)
+        if cached and (now - cached.fetched_at) < self._ttl:
+            return cached.content
+        try:
+            content = await fetcher()
+            self._caches[key] = _Cache(content=content)
+            return content
+        except Exception as exc:
+            logger.warning("Stats fetch failed for '%s': %s", key, exc)
+            if cached:
+                return cached.content
+            raise
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -170,7 +230,7 @@ def _format_top_scorers(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_recent_results(data: dict) -> str:
+def _format_recent_results(data: dict, days: int = 14) -> str:
     matches = data.get("matches", [])
     if not matches:
         return ""
@@ -181,7 +241,7 @@ def _format_recent_results(data: dict) -> str:
         reverse=True,
     )
 
-    lines = ["RECENT RESULTS (last 14 days)"]
+    lines = [f"RECENT RESULTS (last {days} days)"]
     for m in sorted_matches:
         home = m["homeTeam"].get("shortName") or m["homeTeam"]["name"]
         away = m["awayTeam"].get("shortName") or m["awayTeam"]["name"]
@@ -196,14 +256,14 @@ def _format_recent_results(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_upcoming_fixtures(data: dict) -> str:
+def _format_upcoming_fixtures(data: dict, days: int = 21) -> str:
     matches = data.get("matches", [])
     if not matches:
         return ""
 
     sorted_matches = sorted(matches, key=lambda m: m.get("utcDate", ""))
 
-    lines = ["UPCOMING FIXTURES (next 21 days)"]
+    lines = [f"UPCOMING FIXTURES (next {days} days)"]
     for m in sorted_matches:
         home = m["homeTeam"].get("shortName") or m["homeTeam"]["name"]
         away = m["awayTeam"].get("shortName") or m["awayTeam"]["name"]

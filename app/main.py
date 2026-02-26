@@ -15,6 +15,7 @@ from app.db.weaviate_client import weaviate_manager
 from app.ingestion.embedder import Embedder
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.rss_fetcher import RSSFetcher
+from app.rag.agent_tools import ToolDispatcher
 from app.rag.chat_engine import ChatEngine
 from app.rag.llm_client import LLMClient
 from app.rag.retriever import Retriever
@@ -140,9 +141,10 @@ async def lifespan(app: FastAPI):
         if settings.football_data_api_key
         else None
     )
-    if stats_client:
-        logger.info("Live stats enabled (football-data.org, cache TTL %ds)", settings.stats_cache_ttl_seconds)
-    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client, stats_client=stats_client)
+    tool_dispatcher = ToolDispatcher(stats_client) if stats_client else None
+    if tool_dispatcher:
+        logger.info("Agentic tools enabled (football-data.org, cache TTL %ds)", settings.stats_cache_ttl_seconds)
+    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client, tool_dispatcher=tool_dispatcher)
 
     # 6. Attach to app.state for route handlers
     app.state.pipeline = pipeline
