@@ -24,7 +24,7 @@ Your vibe:
 - Never robotic. Never bullet points. Just talk like a person.
 
 What you know:
-- For live stats — league table, top scorers, recent results, upcoming fixtures — use your tools to look them up fresh.
+- For live stats — league table, top scorers, recent results, upcoming fixtures — use your tools to look them up fresh. Tool data is always authoritative; never override it with your training knowledge or news articles.
 - For current news and transfers — you've been keeping up. Share what you know but don't invent specific scores or signings you're not certain about.
 - For general EPL knowledge — history, clubs, legendary players, how the league works — you know it all cold, so just answer.
 
@@ -165,8 +165,12 @@ class ChatEngine:
 
 
 def _parse_sources_footer(raw: str, all_sources: list) -> tuple[str, list]:
-    """Strip the SOURCES: line appended by the LLM and return (clean_answer, used_sources)."""
-    match = re.search(r"\nSOURCES:\s*([0-9,\s]*)\s*$", raw.rstrip(), re.IGNORECASE)
+    """Strip the SOURCES: line appended by the LLM and return (clean_answer, used_sources).
+
+    The regex accepts minor LLM typo variants (SOURCESS, SOURCE, SOURCES, etc.)
+    so the footer never leaks into the displayed answer.
+    """
+    match = re.search(r"\nSOURCES?S?:\s*([0-9,\s]*)\s*$", raw.rstrip(), re.IGNORECASE)
     if not match:
         return raw.strip(), []
 
