@@ -115,6 +115,16 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     logger.info("Starting Footy Phil...")
 
+    # 0. Register Arize Phoenix OTEL exporter (if API key is configured)
+    if settings.phoenix_api_key:
+        import os
+        from phoenix.otel import register
+        # Ensure env vars are set so arize-phoenix-otel can auto-discover them
+        os.environ["PHOENIX_API_KEY"] = settings.phoenix_api_key
+        os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = settings.phoenix_collector_endpoint
+        register(project_name=settings.phoenix_project)
+        logger.info("Phoenix observability enabled → %s (project: %s)", settings.phoenix_collector_endpoint, settings.phoenix_project)
+
     # 1. Connect to Weaviate and ensure collection + schema exist
     weaviate_manager.connect()
     weaviate_manager.ensure_collection()

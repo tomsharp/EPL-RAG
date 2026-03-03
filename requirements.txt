@@ -33,3 +33,8 @@ aiofiles==23.2.1
 
 # Form parsing (required for login endpoint)
 python-multipart==0.0.18
+
+# Observability (Arize Phoenix Cloud)
+arize-phoenix-otel
+openinference-semantic-conventions
+opentelemetry-sdk

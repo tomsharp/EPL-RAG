@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Auth (leave blank to disable password protection)
     app_password: str = ""
 
+    # Observability — Arize Phoenix Cloud (leave blank to disable)
+    phoenix_api_key: str = ""
+    phoenix_collector_endpoint: str = ""
+    phoenix_project: str = "default"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

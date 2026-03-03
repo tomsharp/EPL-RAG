@@ -5,12 +5,16 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from opentelemetry import trace
+from openinference.semconv.trace import SpanAttributes
+
 from app.config import settings
 from app.rag.agent_tools import AGENT_TOOLS, ToolDispatcher
 from app.rag.llm_client import LLMClient
 from app.rag.retriever import Retriever, SourceDoc
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 _SYSTEM_PROMPT = """\
 You're Footy Phil — a die-hard Premier League fan from Manchester who's been watching footy since before you could walk. \
@@ -83,60 +87,68 @@ class ChatEngine:
         self.history = ConversationStore(max_turns=settings.max_history_turns)
 
     async def chat(self, session_id: str, message: str) -> dict:
-        # 1. Retrieve relevant news context (RAG)
-        context_task = asyncio.get_event_loop().run_in_executor(
-            None, self.retriever.search_with_context, message, settings.max_context_docs
-        )
-        context, sources = await context_task
+        with tracer.start_as_current_span("footy-phil.chat") as span:
+            span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "CHAIN")
+            span.set_attribute("session_id", session_id)
+            span.set_attribute(SpanAttributes.INPUT_VALUE, message)
 
-        # 2. Get conversation history
-        history = self.history.get_history(session_id)
+            # 1. Retrieve relevant news context (RAG)
+            context_task = asyncio.get_event_loop().run_in_executor(
+                None, self.retriever.search_with_context, message, settings.max_context_docs
+            )
+            context, sources = await context_task
+            span.set_attribute("retrieved_doc_count", len(sources))
 
-        # 3. Build initial messages
-        messages = self._build_messages(message, context, history)
+            # 2. Get conversation history
+            history = self.history.get_history(session_id)
 
-        # 4. Agentic loop — the LLM can call tools before giving its final answer
-        tools = AGENT_TOOLS if self.tool_dispatcher else []
-        raw_answer = ""
+            # 3. Build initial messages
+            messages = self._build_messages(message, context, history)
 
-        for iteration in range(_MAX_TOOL_ITERATIONS):
-            msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
-            messages.append(msg)
+            # 4. Agentic loop — the LLM can call tools before giving its final answer
+            tools = AGENT_TOOLS if self.tool_dispatcher else []
+            raw_answer = ""
 
-            if finish_reason == "tool_calls":
-                tool_calls = msg.get("tool_calls") or []
-                if not tool_calls:
+            for iteration in range(_MAX_TOOL_ITERATIONS):
+                msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
+                messages.append(msg)
+
+                if finish_reason == "tool_calls":
+                    tool_calls = msg.get("tool_calls") or []
+                    if not tool_calls:
+                        break
+
+                    # Execute all tool calls (may be parallel in theory, but free-tier
+                    # football-data.org is rate-limited so we run sequentially)
+                    for tc in tool_calls:
+                        result = await self.tool_dispatcher.dispatch(tc)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result,
+                        })
+
+                    logger.debug("Tool iteration %d/%d complete", iteration + 1, _MAX_TOOL_ITERATIONS)
+
+                else:
+                    # finish_reason == "stop" (or "length") — we have the final answer
+                    raw_answer = (msg.get("content") or "").strip()
                     break
 
-                # Execute all tool calls (may be parallel in theory, but free-tier
-                # football-data.org is rate-limited so we run sequentially)
-                for tc in tool_calls:
-                    result = await self.tool_dispatcher.dispatch(tc)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
+            # 5. Strip the SOURCES footer and map cited articles
+            answer, used_sources = _parse_sources_footer(raw_answer, sources)
 
-                logger.debug("Tool iteration %d/%d complete", iteration + 1, _MAX_TOOL_ITERATIONS)
+            # 6. Store turns
+            self.history.add_turn(session_id, "user", message)
+            self.history.add_turn(session_id, "assistant", answer)
 
-            else:
-                # finish_reason == "stop" (or "length") — we have the final answer
-                raw_answer = (msg.get("content") or "").strip()
-                break
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, answer)
 
-        # 5. Strip the SOURCES footer and map cited articles
-        answer, used_sources = _parse_sources_footer(raw_answer, sources)
-
-        # 6. Store turns
-        self.history.add_turn(session_id, "user", message)
-        self.history.add_turn(session_id, "assistant", answer)
-
-        return {
-            "answer": answer,
-            "sources": used_sources,
-            "retrieved_doc_count": len(sources),
-        }
+            return {
+                "answer": answer,
+                "sources": used_sources,
+                "retrieved_doc_count": len(sources),
+            }
 
     def _build_messages(
         self,
