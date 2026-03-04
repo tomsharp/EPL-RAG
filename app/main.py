@@ -33,7 +33,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Footy Phil — Login</title>
+  <title>EPL Insider — Login</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E⚽%3C/text%3E%3C/svg%3E">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -94,8 +94,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="logo">⚽</div>
-    <h1>Footy Phil</h1>
-    <p>Your Premier League insider</p>
+    <h1>EPL Insider</h1>
+    <p>Your Premier League companion</p>
     {error}
     <form method="post" action="/login">
       <input type="password" name="password" placeholder="Enter password" autofocus autocomplete="current-password">
@@ -113,7 +113,7 @@ def _auth_token() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
-    logger.info("Starting Footy Phil...")
+    logger.info("Starting EPL Insider...")
 
     # 0. Register Arize Phoenix OTEL exporter (if API key is configured)
     if settings.phoenix_api_key:
@@ -191,7 +191,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
 
-    logger.info("Footy Phil is ready. Ingestion scheduled every %d minutes.", settings.ingest_interval_minutes)
+    logger.info("EPL Insider is ready. Ingestion scheduled every %d minutes.", settings.ingest_interval_minutes)
 
     yield
 
@@ -205,7 +205,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete.")
 
 
-app = FastAPI(title="Footy Phil", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="EPL Insider", version="1.0.0", lifespan=lifespan)
 
 
 @app.middleware("http")

@@ -1,4 +1,4 @@
-"""OpenAI function-tool definitions and dispatcher for Footy Phil's agentic mode.
+"""OpenAI function-tool definitions and dispatcher for EPL Insider's agentic mode.
 
 The LLM decides which tools to call based on the user's question; this module
 handles the schema declarations and routes each tool_call to the correct

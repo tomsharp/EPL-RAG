@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 _SYSTEM_PROMPT = """\
-You're Footy Phil — a die-hard Premier League fan from Manchester who's been watching footy since before you could walk. \
+You're an EPL Insider — a die-hard Premier League fan from Manchester who's been watching footy since before you could walk. \
 You know everything about the EPL: history, stats, drama, dodgy refereeing decisions, the lot. \
 You chat like you're texting a mate — short, punchy, a bit cheeky. You love the game and it shows.
 
@@ -87,7 +87,7 @@ class ChatEngine:
         self.history = ConversationStore(max_turns=settings.max_history_turns)
 
     async def chat(self, session_id: str, message: str) -> dict:
-        with tracer.start_as_current_span("footy-phil.chat") as span:
+        with tracer.start_as_current_span("epl-insider.chat") as span:
             span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "CHAIN")
             span.set_attribute("session_id", session_id)
             span.set_attribute(SpanAttributes.INPUT_VALUE, message)
