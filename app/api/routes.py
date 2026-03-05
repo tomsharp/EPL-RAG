@@ -1,10 +1,12 @@
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import (
     ChatRequest,
     ChatResponse,
+    FeedbackRequest,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -67,6 +69,33 @@ def ingest_endpoint(body: IngestRequest, request: Request) -> IngestResponse:
         articles_skipped=stats["articles_skipped"],
         duration_seconds=stats["duration_seconds"],
     )
+
+
+@router.post("/feedback", status_code=204)
+async def feedback_endpoint(body: FeedbackRequest) -> None:
+    if not settings.resend_api_key or not settings.feedback_email_to:
+        raise HTTPException(status_code=503, detail="Feedback not configured")
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": settings.feedback_email_from,
+                    "to": [settings.feedback_email_to],
+                    "subject": "EPL Insider Feedback",
+                    "text": body.text,
+                },
+                timeout=10.0,
+            )
+            if not res.is_success:
+                logger.error("Resend %s: %s", res.status_code, res.text)
+                res.raise_for_status()
+    except httpx.HTTPStatusError:
+        raise HTTPException(status_code=500, detail="Failed to send feedback")
+    except Exception:
+        logger.exception("Resend request failed")
+        raise HTTPException(status_code=500, detail="Failed to send feedback")
 
 
 @router.get("/health", response_model=HealthResponse)

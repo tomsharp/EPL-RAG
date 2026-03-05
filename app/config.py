@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Auth (leave blank to disable password protection)
     app_password: str = ""
 
+    # Feedback email — Resend (leave blank to disable)
+    resend_api_key: str = ""
+    feedback_email_to: str = ""
+    feedback_email_from: str = "EPL Insider <feedback@resend.dev>"
+
     # Observability — Arize Phoenix Cloud (leave blank to disable)
     phoenix_api_key: str = ""
     phoenix_collector_endpoint: str = ""

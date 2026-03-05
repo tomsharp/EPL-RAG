@@ -39,6 +39,10 @@ class IngestResponse(BaseModel):
     duration_seconds: float
 
 
+class FeedbackRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
 class HealthResponse(BaseModel):
     status: str
 
