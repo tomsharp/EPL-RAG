@@ -1,14 +1,12 @@
 import asyncio
 import logging
 import re
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from opentelemetry import trace
 from openinference.semconv.trace import SpanAttributes
 
 from app.config import settings
+from app.db.conversation_db import ConversationRepository
 from app.rag.agent_tools import AGENT_TOOLS, ToolDispatcher
 from app.rag.llm_client import LLMClient
 from app.rag.retriever import Retriever, SourceDoc
@@ -41,55 +39,23 @@ Hard rules:
 _MAX_TOOL_ITERATIONS = 5
 
 
-@dataclass
-class Turn:
-    role: str  # "user" or "assistant"
-    content: str
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class ConversationStore:
-    def __init__(self, max_turns: int = 5) -> None:
-        self._sessions: dict[str, list[Turn]] = defaultdict(list)
-        self.max_turns = max_turns
-
-    def add_turn(self, session_id: str, role: str, content: str) -> None:
-        turns = self._sessions[session_id]
-        turns.append(Turn(role=role, content=content))
-        cap = self.max_turns * 2
-        if len(turns) > cap:
-            self._sessions[session_id] = turns[-cap:]
-
-    def get_history(self, session_id: str) -> list[Turn]:
-        return self._sessions.get(session_id, [])
-
-    def format_history(self, session_id: str) -> str:
-        turns = self.get_history(session_id)
-        if not turns:
-            return ""
-        lines = []
-        for turn in turns:
-            label = "User" if turn.role == "user" else "Assistant"
-            lines.append(f"{label}: {turn.content}")
-        return "\n".join(lines)
-
-
 class ChatEngine:
     def __init__(
         self,
         retriever: Retriever,
         llm_client: LLMClient,
         tool_dispatcher: ToolDispatcher | None = None,
+        conv_repo: ConversationRepository | None = None,
     ) -> None:
         self.retriever = retriever
         self.llm = llm_client
         self.tool_dispatcher = tool_dispatcher
-        self.history = ConversationStore(max_turns=settings.max_history_turns)
+        self.conv_repo = conv_repo
 
     async def chat(self, session_id: str, message: str) -> dict:
         with tracer.start_as_current_span("epl-insider.chat") as span:
             span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "CHAIN")
-            span.set_attribute("session_id", session_id)
+            span.set_attribute(SpanAttributes.SESSION_ID, session_id)
             span.set_attribute(SpanAttributes.INPUT_VALUE, message)
 
             # 1. Retrieve relevant news context (RAG)
@@ -100,7 +66,9 @@ class ChatEngine:
             span.set_attribute("retrieved_doc_count", len(sources))
 
             # 2. Get conversation history
-            history = self.history.get_history(session_id)
+            history: list[dict] = []
+            if self.conv_repo:
+                history = await self.conv_repo.get_history(session_id, max_turns=settings.max_history_turns)
 
             # 3. Build initial messages
             messages = self._build_messages(message, context, history)
@@ -138,9 +106,11 @@ class ChatEngine:
             # 5. Strip the SOURCES footer and map cited articles
             answer, used_sources = _parse_sources_footer(raw_answer, sources)
 
-            # 6. Store turns
-            self.history.add_turn(session_id, "user", message)
-            self.history.add_turn(session_id, "assistant", answer)
+            # 6. Persist turns
+            if self.conv_repo:
+                sources_payload = [{"title": s.title, "url": s.url, "score": s.score} for s in used_sources]
+                await self.conv_repo.save_turn(session_id, "user", message)
+                await self.conv_repo.save_turn(session_id, "assistant", answer, sources_used=sources_payload)
 
             span.set_attribute(SpanAttributes.OUTPUT_VALUE, answer)
 
@@ -154,13 +124,13 @@ class ChatEngine:
         self,
         message: str,
         context: str,
-        history: list[Turn],
+        history: list[dict],
     ) -> list[dict]:
         messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
 
         # Inject prior conversation turns
         for turn in history:
-            messages.append({"role": turn.role, "content": turn.content})
+            messages.append({"role": turn["role"], "content": turn["content"]})
 
         # Build user content: news context + question
         user_parts: list[str] = []

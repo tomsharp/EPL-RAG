@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Auth (leave blank to disable password protection)
     app_password: str = ""
 
+    # Conversation persistence (Postgres)
+    database_url: str = ""
+
     # Feedback email — Resend (leave blank to disable)
     resend_api_key: str = ""
     feedback_email_to: str = ""

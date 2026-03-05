@@ -34,6 +34,9 @@ aiofiles==23.2.1
 # Form parsing (required for login endpoint)
 python-multipart==0.0.18
 
+# Conversation persistence
+asyncpg==0.30.0
+
 # Observability (Arize Phoenix Cloud)
 arize-phoenix-otel
 openinference-semantic-conventions

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.config import settings
+from app.db.conversation_db import ConversationRepository, init_db
 from app.db.weaviate_client import weaviate_manager
 from app.ingestion.embedder import Embedder
 from app.ingestion.pipeline import IngestionPipeline
@@ -125,22 +126,29 @@ async def lifespan(app: FastAPI):
         register(project_name=settings.phoenix_project)
         logger.info("Phoenix observability enabled → %s (project: %s)", settings.phoenix_collector_endpoint, settings.phoenix_project)
 
-    # 1. Connect to Weaviate and ensure collection + schema exist
+    # 1. Initialize Postgres conversation store
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL is required")
+    pool = await init_db(settings.database_url)
+    conv_repo = ConversationRepository(pool)
+    logger.info("Conversation DB ready (Postgres)")
+
+    # 2. Connect to Weaviate and ensure collection + schema exist
     weaviate_manager.connect()
     weaviate_manager.ensure_collection()
 
-    # 2. Initialize shared components
+    # 3. Initialize shared components
     embedder = Embedder(settings.embedding_model)
     dedup_store = DeduplicationStore()
 
-    # 3. Warm the deduplication cache from existing Weaviate data
+    # 4. Warm the deduplication cache from existing Weaviate data
     dedup_store.warm_cache()
 
-    # 4. Build the ingestion pipeline
+    # 5. Build the ingestion pipeline
     fetcher = RSSFetcher()
     pipeline = IngestionPipeline(fetcher=fetcher, embedder=embedder, dedup_store=dedup_store)
 
-    # 5. Build the RAG chain
+    # 6. Build the RAG chain
     retriever = Retriever(embedder=embedder)
     llm_client = LLMClient()
     stats_client = (
@@ -154,13 +162,13 @@ async def lifespan(app: FastAPI):
     tool_dispatcher = ToolDispatcher(stats_client) if stats_client else None
     if tool_dispatcher:
         logger.info("Agentic tools enabled (football-data.org, cache TTL %ds)", settings.stats_cache_ttl_seconds)
-    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client, tool_dispatcher=tool_dispatcher)
+    chat_engine = ChatEngine(retriever=retriever, llm_client=llm_client, tool_dispatcher=tool_dispatcher, conv_repo=conv_repo)
 
-    # 6. Attach to app.state for route handlers
+    # 7. Attach to app.state for route handlers
     app.state.pipeline = pipeline
     app.state.chat_engine = chat_engine
 
-    # 7. Seed the database on startup (run in thread pool so the event loop stays free)
+    # 8. Seed the database on startup (run in thread pool so the event loop stays free)
     logger.info("Seeding database with latest EPL news...")
     loop = asyncio.get_event_loop()
     seed_stats = await loop.run_in_executor(None, pipeline.run)
@@ -172,7 +180,7 @@ async def lifespan(app: FastAPI):
         seed_stats["duration_seconds"],
     )
 
-    # 8. Schedule periodic ingestion
+    # 9. Schedule periodic ingestion
     scheduler = AsyncIOScheduler(
         timezone="UTC",
         job_defaults={
@@ -201,6 +209,7 @@ async def lifespan(app: FastAPI):
     await llm_client.close()
     if stats_client:
         await stats_client.close()
+    await conv_repo.close()
     weaviate_manager.close()
     logger.info("Shutdown complete.")
 
