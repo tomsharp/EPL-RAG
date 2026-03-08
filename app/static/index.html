@@ -496,7 +496,6 @@
     window.visualViewport.addEventListener('scroll', onViewportResize);
   }
 
-  const SESSION_ID = crypto.randomUUID();
   const wrap = document.getElementById('chat-wrap');
   const input = document.getElementById('msg-input');
   const btn = document.getElementById('send-btn');
@@ -607,7 +606,7 @@
       const res = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: SESSION_ID, message: text }),
+        body: JSON.stringify({ message: text }),
       });
 
       hideLoading();
@@ -676,6 +675,21 @@
   fab.addEventListener('click', openFeedback);
   fbCancel.addEventListener('click', closeFeedback);
   overlay.addEventListener('click', e => { if (e.target === overlay) closeFeedback(); });
+
+  // Restore conversation history from server (cookie-keyed session)
+  (async () => {
+    try {
+      const res = await fetch('/history');
+      if (!res.ok) return;
+      const turns = await res.json();
+      if (turns.length === 0) return;
+      clearWelcome();
+      turns.forEach(t => {
+        if (t.role === 'user') addUserMsg(t.content);
+        else if (t.role === 'assistant') addAssistantMsg(t.content, []);
+      });
+    } catch { /* silently ignore — not critical */ }
+  })();
 
   fbSubmit.addEventListener('click', async () => {
     const text = fbTextarea.value.trim();
