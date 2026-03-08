@@ -13,8 +13,12 @@ class SourceDoc(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(..., description="Client-supplied UUID for conversation continuity")
     message: str = Field(..., min_length=1, max_length=2000)
+
+
+class HistoryTurn(BaseModel):
+    role: str
+    content: str
 
 
 class ChatResponse(BaseModel):

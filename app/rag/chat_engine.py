@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 import re
+from typing import AsyncGenerator
 
 from opentelemetry import trace
 from openinference.semconv.trace import SpanAttributes
@@ -147,6 +149,102 @@ class ChatEngine:
                 "retrieved_doc_count": len(sources),
             }
 
+    async def chat_stream(self, session_id: str, message: str) -> AsyncGenerator[str, None]:
+        """Async generator that yields SSE strings for a streaming response.
+
+        Tool iterations (if any) run non-streaming first; only the final
+        answer is streamed token-by-token to the client.
+        """
+        with tracer.start_as_current_span("epl-insider.chat.stream") as span:
+            span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "CHAIN")
+            span.set_attribute(SpanAttributes.SESSION_ID, session_id)
+            span.set_attribute(SpanAttributes.INPUT_VALUE, message)
+
+            # 1. Save user turn upfront
+            user_turn_id: str | None = None
+            if self.conv_repo:
+                user_turn_id = await self.conv_repo.save_turn(session_id, "user", message)
+
+            # 2. Retrieve relevant news context
+            with tracer.start_as_current_span("epl-insider.retrieval") as retrieval_span:
+                retrieval_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "RETRIEVER")
+                retrieval_span.set_attribute(SpanAttributes.INPUT_VALUE, message)
+                context, sources = await asyncio.get_event_loop().run_in_executor(
+                    None, self.retriever.search_with_context, message, settings.max_context_docs
+                )
+                for i, src in enumerate(sources):
+                    retrieval_span.set_attribute(f"retrieved_doc.{i}.title", src.title)
+                    retrieval_span.set_attribute(f"retrieved_doc.{i}.score", src.score)
+            span.set_attribute("retrieved_doc_count", len(sources))
+
+            if self.conv_repo and user_turn_id and sources:
+                await self.conv_repo.save_retrieval(
+                    user_turn_id,
+                    message,
+                    [{"title": s.title, "url": s.url, "source": s.source, "score": s.score} for s in sources],
+                )
+
+            # 3. Conversation history
+            history: list[dict] = []
+            if self.conv_repo:
+                history = await self.conv_repo.get_history(session_id, max_turns=settings.max_history_turns)
+
+            # 4. Build messages
+            messages = self._build_messages(message, context, history)
+
+            # 5. Tool iterations (non-streaming) — resolve any tool calls before streaming
+            tools = AGENT_TOOLS if self.tool_dispatcher else []
+            for iteration in range(_MAX_TOOL_ITERATIONS):
+                msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
+
+                if finish_reason != "tool_calls":
+                    # LLM skipped tools — discard this non-streamed answer and re-generate
+                    # below with streaming so the user gets the token-by-token experience
+                    break
+
+                messages.append(msg)
+                tool_calls = msg.get("tool_calls") or []
+                for tc in tool_calls:
+                    tool_name = tc.get("function", {}).get("name", "unknown")
+                    tc_input = tc.get("function", {}).get("arguments", "")
+                    with tracer.start_as_current_span("epl-insider.tool") as tool_span:
+                        tool_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "TOOL")
+                        tool_span.set_attribute(SpanAttributes.TOOL_NAME, tool_name)
+                        tool_span.set_attribute(SpanAttributes.INPUT_VALUE, tc_input)
+                        result = await self.tool_dispatcher.dispatch(tc)
+                        tool_span.set_attribute(SpanAttributes.OUTPUT_VALUE, result)
+                    if self.conv_repo and user_turn_id:
+                        await self.conv_repo.save_tool_call(user_turn_id, tool_name, tc_input, result)
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+            # 6. Stream the final answer
+            raw_answer = ""
+            async for chunk in self.llm.stream_complete(messages):
+                raw_answer += chunk
+                yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
+
+            # 7. Strip SOURCES footer and map cited articles
+            answer, used_sources = _parse_sources_footer(raw_answer, sources)
+
+            # 8. Persist assistant turn
+            if self.conv_repo:
+                await self.conv_repo.save_turn(session_id, "assistant", answer)
+
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, answer)
+
+            # 9. Send done event with clean answer + sources
+            sources_payload = [
+                {
+                    "title": s.title,
+                    "url": s.url,
+                    "published": str(s.published) if s.published else None,
+                    "source": s.source,
+                    "score": s.score,
+                }
+                for s in used_sources
+            ]
+            yield f"data: {json.dumps({'type': 'done', 'answer': answer, 'sources': sources_payload, 'session_id': session_id})}\n\n"
+
     def _build_messages(
         self,
         message: str,
@@ -165,7 +263,7 @@ class ChatEngine:
             user_parts.append(
                 f"Here's the latest news that might be relevant:\n---\n{context}\n---\n\n"
                 f"After your reply, on its own line write: SOURCES: followed by the numbers "
-                f"of any articles above you actually used (e.g. SOURCES:1,3), or SOURCES: if none."
+                f"of any articles above you actually used (e.g. SOURCES:1,3), or just SOURCES: with nothing after it if you used none."
             )
         user_parts.append(message)
 
@@ -179,7 +277,7 @@ def _parse_sources_footer(raw: str, all_sources: list) -> tuple[str, list]:
     The regex accepts minor LLM typo variants (SOURCESS, SOURCE, SOURCES, etc.)
     so the footer never leaks into the displayed answer.
     """
-    match = re.search(r"\nSOURCES?S?:\s*([0-9,\s]*)\s*$", raw.rstrip(), re.IGNORECASE)
+    match = re.search(r"\nSOURCES?S?:\s*(.*?)\s*$", raw.rstrip(), re.IGNORECASE)
     if not match:
         return raw.strip(), []
 

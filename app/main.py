@@ -167,6 +167,7 @@ async def lifespan(app: FastAPI):
     # 7. Attach to app.state for route handlers
     app.state.pipeline = pipeline
     app.state.chat_engine = chat_engine
+    app.state.conv_repo = conv_repo
 
     # 8. Seed the database on startup (run in thread pool so the event loop stays free)
     logger.info("Seeding database with latest EPL news...")

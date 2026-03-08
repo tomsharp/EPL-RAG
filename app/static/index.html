@@ -496,7 +496,6 @@
     window.visualViewport.addEventListener('scroll', onViewportResize);
   }
 
-  const SESSION_ID = crypto.randomUUID();
   const wrap = document.getElementById('chat-wrap');
   const input = document.getElementById('msg-input');
   const btn = document.getElementById('send-btn');
@@ -522,50 +521,54 @@
     scrollBottom();
   }
 
+  function buildSourcesBlock(sources) {
+    const details = document.createElement('details');
+    details.className = 'sources-block';
+    const summary = document.createElement('summary');
+    summary.textContent = `${sources.length} source${sources.length !== 1 ? 's' : ''}`;
+    details.appendChild(summary);
+    sources.forEach(s => {
+      const card = document.createElement('div');
+      card.className = 'source-card';
+      const a = document.createElement('a');
+      a.href = s.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = s.title;
+      card.appendChild(a);
+      const meta = document.createElement('div');
+      meta.className = 'source-meta';
+      const parts = [s.source.toUpperCase()];
+      if (s.published) parts.push(s.published.slice(0, 10));
+      parts.push(`${Math.round(s.score * 100)}% match`);
+      meta.textContent = parts.join(' · ');
+      card.appendChild(meta);
+      details.appendChild(card);
+    });
+    return details;
+  }
+
   function addAssistantMsg(text, sources) {
     const row = document.createElement('div');
     row.className = 'msg-row assistant';
-
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
     row.appendChild(bubble);
-
-    if (sources && sources.length > 0) {
-      const details = document.createElement('details');
-      details.className = 'sources-block';
-
-      const summary = document.createElement('summary');
-      summary.textContent = `${sources.length} source${sources.length !== 1 ? 's' : ''}`;
-      details.appendChild(summary);
-
-      sources.forEach(s => {
-        const card = document.createElement('div');
-        card.className = 'source-card';
-
-        const a = document.createElement('a');
-        a.href = s.url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.textContent = s.title;
-        card.appendChild(a);
-
-        const meta = document.createElement('div');
-        meta.className = 'source-meta';
-        const parts = [s.source.toUpperCase()];
-        if (s.published) parts.push(s.published.slice(0, 10));
-        parts.push(`${Math.round(s.score * 100)}% match`);
-        meta.textContent = parts.join(' · ');
-        card.appendChild(meta);
-
-        details.appendChild(card);
-      });
-
-      row.appendChild(details);
-    }
-
+    if (sources && sources.length > 0) row.appendChild(buildSourcesBlock(sources));
     wrap.appendChild(row);
     scrollBottom();
+  }
+
+  function createStreamingBubble() {
+    const row = document.createElement('div');
+    row.className = 'msg-row assistant';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    row.appendChild(bubble);
+    wrap.appendChild(row);
+    scrollBottom();
+    return { row, bubble };
   }
 
   function addError(msg) {
@@ -604,24 +607,56 @@
     showLoading();
 
     try {
-      const res = await fetch('/chat', {
+      const res = await fetch('/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: SESSION_ID, message: text }),
+        body: JSON.stringify({ message: text }),
       });
 
-      hideLoading();
-
       if (!res.ok) {
+        hideLoading();
         const body = await res.json().catch(() => ({}));
         addError(body.detail || `Error ${res.status}: ${res.statusText}`);
         return;
       }
 
-      const data = await res.json();
-      addAssistantMsg(data.answer, data.sources);
+      let streamStarted = false;
+      let row, bubble;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          if (evt.type === 'token') {
+            if (!streamStarted) {
+              hideLoading();
+              ({ row, bubble } = createStreamingBubble());
+              streamStarted = true;
+            }
+            bubble.textContent += evt.text;
+            scrollBottom();
+          } else if (evt.type === 'done') {
+            if (!streamStarted) { hideLoading(); ({ row, bubble } = createStreamingBubble()); }
+            bubble.textContent = evt.answer;
+            if (evt.sources && evt.sources.length > 0) row.appendChild(buildSourcesBlock(evt.sources));
+            scrollBottom();
+          } else if (evt.type === 'error') {
+            if (!streamStarted) { hideLoading(); ({ row, bubble } = createStreamingBubble()); streamStarted = true; }
+            bubble.textContent = 'Something went wrong. Try again.';
+          }
+        }
+      }
     } catch (e) {
-      hideLoading();
+      if (!streamStarted) hideLoading();
       addError('Could not reach the server. Make sure the app is running.');
     } finally {
       busy = false;
@@ -676,6 +711,21 @@
   fab.addEventListener('click', openFeedback);
   fbCancel.addEventListener('click', closeFeedback);
   overlay.addEventListener('click', e => { if (e.target === overlay) closeFeedback(); });
+
+  // Restore conversation history from server (cookie-keyed session)
+  (async () => {
+    try {
+      const res = await fetch('/history');
+      if (!res.ok) return;
+      const turns = await res.json();
+      if (turns.length === 0) return;
+      clearWelcome();
+      turns.forEach(t => {
+        if (t.role === 'user') addUserMsg(t.content);
+        else if (t.role === 'assistant') addAssistantMsg(t.content, []);
+      });
+    } catch { /* silently ignore — not critical */ }
+  })();
 
   fbSubmit.addEventListener('click', async () => {
     const text = fbTextarea.value.trim();

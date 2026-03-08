@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import AsyncGenerator
 
 import httpx
 from opentelemetry import trace
@@ -85,6 +86,35 @@ class LLMClient:
                 span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_TOTAL, usage.get("total_tokens", 0))
 
             return out, choice["finish_reason"]
+
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        max_tokens: int = 512,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completions, yielding text chunks as they arrive."""
+        body = {
+            "model": settings.openai_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.9,
+            "stream": True,
+        }
+        async with self._client.stream("POST", "/v1/chat/completions", json=body) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                    content = chunk["choices"][0]["delta"].get("content")
+                    if content:
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
 
     async def generate(self, messages: list[dict], max_tokens: int = 512) -> str:
         """Convenience wrapper — returns content string only (no tool support)."""
