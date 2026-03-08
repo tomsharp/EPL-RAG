@@ -116,13 +116,13 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     logger.info("Starting EPL Insider...")
 
-    # 0. Register Arize Phoenix OTEL exporter (if API key is configured)
-    if settings.phoenix_api_key:
+    # 0. Register Phoenix OTEL exporter (self-hosted or Arize Cloud)
+    if settings.phoenix_collector_endpoint:
         import os
         from phoenix.otel import register
-        # Ensure env vars are set so arize-phoenix-otel can auto-discover them
-        os.environ["PHOENIX_API_KEY"] = settings.phoenix_api_key
         os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = settings.phoenix_collector_endpoint
+        if settings.phoenix_api_key:
+            os.environ["PHOENIX_API_KEY"] = settings.phoenix_api_key
         register(project_name=settings.phoenix_project)
         logger.info("Phoenix observability enabled → %s (project: %s)", settings.phoenix_collector_endpoint, settings.phoenix_project)
 

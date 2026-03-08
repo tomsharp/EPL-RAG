@@ -19,12 +19,31 @@ _DDL = [
         session_id   TEXT NOT NULL REFERENCES sessions(id),
         role         TEXT NOT NULL,
         content      TEXT NOT NULL,
-        sources_used TEXT,
-        tool_calls   TEXT,
         created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id, created_at)",
+    """
+    CREATE TABLE IF NOT EXISTS tool_calls (
+        id              TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id),
+        tool_name       TEXT NOT NULL,
+        input           TEXT,
+        output          TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS retrieval_results (
+        id              TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id),
+        query           TEXT NOT NULL,
+        sources         JSONB,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_conv_session   ON conversations(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_conv      ON tool_calls(conversation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_retrieval_conv ON retrieval_results(conversation_id)",
 ]
 
 
@@ -52,29 +71,59 @@ class ConversationRepository:
                 session_id,
             )
 
-    async def save_turn(
-        self,
-        session_id: str,
-        role: str,
-        content: str,
-        *,
-        sources_used: list | None = None,
-        tool_calls: list | None = None,
-    ) -> None:
+    async def save_turn(self, session_id: str, role: str, content: str) -> str:
+        """Insert a conversation turn and return its ID."""
         await self.ensure_session(session_id)
+        turn_id = str(uuid.uuid4())
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO conversations
-                    (id, session_id, role, content, sources_used, tool_calls)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO conversations (id, session_id, role, content)
+                VALUES ($1, $2, $3, $4)
                 """,
-                str(uuid.uuid4()),
+                turn_id,
                 session_id,
                 role,
                 content,
-                json.dumps(sources_used) if sources_used else None,
-                json.dumps(tool_calls) if tool_calls else None,
+            )
+        return turn_id
+
+    async def save_tool_call(
+        self,
+        conversation_id: str,
+        tool_name: str,
+        input: str,
+        output: str,
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO tool_calls (id, conversation_id, tool_name, input, output)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                str(uuid.uuid4()),
+                conversation_id,
+                tool_name,
+                input,
+                output,
+            )
+
+    async def save_retrieval(
+        self,
+        conversation_id: str,
+        query: str,
+        sources: list[dict],
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO retrieval_results (id, conversation_id, query, sources)
+                VALUES ($1, $2, $3, $4)
+                """,
+                str(uuid.uuid4()),
+                conversation_id,
+                query,
+                json.dumps(sources),
             )
 
     async def get_history(self, session_id: str, max_turns: int = 10) -> list[dict]:

@@ -58,27 +58,47 @@ class ChatEngine:
             span.set_attribute(SpanAttributes.SESSION_ID, session_id)
             span.set_attribute(SpanAttributes.INPUT_VALUE, message)
 
-            # 1. Retrieve relevant news context (RAG)
-            context_task = asyncio.get_event_loop().run_in_executor(
-                None, self.retriever.search_with_context, message, settings.max_context_docs
-            )
-            context, sources = await context_task
+            # 1. Save user turn upfront so tool_calls / retrieval can reference it
+            user_turn_id: str | None = None
+            if self.conv_repo:
+                user_turn_id = await self.conv_repo.save_turn(session_id, "user", message)
+
+            # 2. Retrieve relevant news context (RAG)
+            with tracer.start_as_current_span("epl-insider.retrieval") as retrieval_span:
+                retrieval_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "RETRIEVER")
+                retrieval_span.set_attribute(SpanAttributes.INPUT_VALUE, message)
+                context, sources = await asyncio.get_event_loop().run_in_executor(
+                    None, self.retriever.search_with_context, message, settings.max_context_docs
+                )
+                for i, src in enumerate(sources):
+                    retrieval_span.set_attribute(f"retrieved_doc.{i}.title", src.title)
+                    retrieval_span.set_attribute(f"retrieved_doc.{i}.score", src.score)
             span.set_attribute("retrieved_doc_count", len(sources))
 
-            # 2. Get conversation history
+            if self.conv_repo and user_turn_id and sources:
+                await self.conv_repo.save_retrieval(
+                    user_turn_id,
+                    message,
+                    [{"title": s.title, "url": s.url, "source": s.source, "score": s.score} for s in sources],
+                )
+
+            # 3. Get conversation history
             history: list[dict] = []
             if self.conv_repo:
                 history = await self.conv_repo.get_history(session_id, max_turns=settings.max_history_turns)
 
-            # 3. Build initial messages
+            # 4. Build initial messages
             messages = self._build_messages(message, context, history)
 
-            # 4. Agentic loop — the LLM can call tools before giving its final answer
+            # 5. Agentic loop — the LLM can call tools before giving its final answer
             tools = AGENT_TOOLS if self.tool_dispatcher else []
             raw_answer = ""
 
             for iteration in range(_MAX_TOOL_ITERATIONS):
-                msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
+                with tracer.start_as_current_span("epl-insider.llm") as llm_span:
+                    llm_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "LLM")
+                    llm_span.set_attribute("iteration", iteration)
+                    msg, finish_reason = await self.llm.complete(messages, tools=tools or None)
                 messages.append(msg)
 
                 if finish_reason == "tool_calls":
@@ -89,7 +109,16 @@ class ChatEngine:
                     # Execute all tool calls (may be parallel in theory, but free-tier
                     # football-data.org is rate-limited so we run sequentially)
                     for tc in tool_calls:
-                        result = await self.tool_dispatcher.dispatch(tc)
+                        tool_name = tc.get("function", {}).get("name", "unknown")
+                        tc_input = tc.get("function", {}).get("arguments", "")
+                        with tracer.start_as_current_span("epl-insider.tool") as tool_span:
+                            tool_span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, "TOOL")
+                            tool_span.set_attribute(SpanAttributes.TOOL_NAME, tool_name)
+                            tool_span.set_attribute(SpanAttributes.INPUT_VALUE, tc_input)
+                            result = await self.tool_dispatcher.dispatch(tc)
+                            tool_span.set_attribute(SpanAttributes.OUTPUT_VALUE, result)
+                        if self.conv_repo and user_turn_id:
+                            await self.conv_repo.save_tool_call(user_turn_id, tool_name, tc_input, result)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
@@ -103,14 +132,12 @@ class ChatEngine:
                     raw_answer = (msg.get("content") or "").strip()
                     break
 
-            # 5. Strip the SOURCES footer and map cited articles
+            # 6. Strip the SOURCES footer and map cited articles
             answer, used_sources = _parse_sources_footer(raw_answer, sources)
 
-            # 6. Persist turns
+            # 7. Persist assistant turn
             if self.conv_repo:
-                sources_payload = [{"title": s.title, "url": s.url, "score": s.score} for s in used_sources]
-                await self.conv_repo.save_turn(session_id, "user", message)
-                await self.conv_repo.save_turn(session_id, "assistant", answer, sources_used=sources_payload)
+                await self.conv_repo.save_turn(session_id, "assistant", answer)
 
             span.set_attribute(SpanAttributes.OUTPUT_VALUE, answer)
 
