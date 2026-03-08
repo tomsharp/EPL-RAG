@@ -3,6 +3,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
     ChatRequest,
@@ -76,6 +77,34 @@ async def history_endpoint(request: Request) -> list[HistoryTurn]:
         return []
     turns = await conv_repo.get_history(session_id, max_turns=100)
     return [HistoryTurn(role=t["role"], content=t["content"]) for t in turns]
+
+
+@router.post("/chat/stream")
+async def chat_stream_endpoint(body: ChatRequest, request: Request, response: Response) -> StreamingResponse:
+    session_id = request.cookies.get(_SESSION_COOKIE) or str(uuid.uuid4())
+    chat_engine = request.app.state.chat_engine
+
+    async def event_generator():
+        try:
+            async for chunk in chat_engine.chat_stream(session_id, body.message):
+                yield chunk
+        except Exception:
+            logger.exception("Streaming error in /chat/stream")
+            yield f'data: {{"type":"error","message":"Internal server error"}}\n\n'
+
+    streaming_response = StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+    streaming_response.set_cookie(
+        key=_SESSION_COOKIE,
+        value=session_id,
+        max_age=_SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+    return streaming_response
 
 
 @router.post("/ingest", response_model=IngestResponse)
